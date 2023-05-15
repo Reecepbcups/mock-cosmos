@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Union
 
+from chain_types import Coin, Delegation
+
 # Create an empty chain for blocks to be stored.
 chain: list = []
 
@@ -10,15 +12,9 @@ chain_hash_index: dict[str, int] = {}
 
 # A real chain also keeps up with this state by height.
 balances: dict[str, int] = {}
+delegations: dict[str, list[Delegation]] = {}
 
 FEE_ACCOUNT_MODULE = "fee_account_module"
-
-
-# Base single types
-@dataclass
-class Coin:
-    denom: str
-    amount: int
 
 
 # Messages
@@ -45,12 +41,22 @@ class BankSendMsg:
 
 
 @dataclass
-class DelegateStakingMsg:
-    delegator: str
-    validator: str
-    amount: Coin
-
+class DelegateStakingMsg(Delegation):
     type: str = "@delegate_staking"
+
+    def handler(self):
+        # ensure they have enough balance, if so, then add Delegation to delegations
+        global balances
+        current_delegator_balance = balances.get(self.delegator, 0)
+
+        if current_delegator_balance < self.amount.amount:
+            raise Exception("Insufficient funds")
+
+        if self.delegator not in delegations:
+            delegations[self.delegator] = []
+
+        delegations[self.delegator].append(self)
+        balances[self.delegator] = current_delegator_balance - self.amount.amount
 
 
 # All messages
@@ -130,11 +136,11 @@ def create_new_block(txs: list[Tx] = []) -> Block:
     if height > 0:
         previous_hash = chain[len(chain) - 1].hash
 
+    # Verify signature and fees.
     for tx in txs:
         if not isinstance(tx, Tx):
             raise Exception("All txs must be of type Tx")
         else:
-            # remove fee from their account
             if not tx.verify_signature():
                 raise Exception("Invalid signature")
 
@@ -147,17 +153,19 @@ def create_new_block(txs: list[Tx] = []) -> Block:
             balances[tx.sender] -= (tx.fee).amount
             balances[FEE_ACCOUNT_MODULE] += (tx.fee).amount
 
-            for MSG in tx.messages:
-                # check if handler function is defined
-                if hasattr(MSG.msg, "handler"):
-                    MSG.msg.handler()
+    # handle the messages logic.
+    for tx in txs:
+        for MSG in tx.messages:
+            # if the message has a handler defined, then run it
+            if hasattr(MSG.msg, "handler"):
+                MSG.msg.handler()
+            else:
+                raise Exception("Message does not have a handler", MSG.msg)
 
     # Create the base block
     block = Block(hash="", height=height, previous_hash=previous_hash, txs=txs)
     # Set the hash of the data for the block after the fact.
     block.hash = generate_block_hash(block)
-
-    # TODO: Add handler here for each message
 
     return block
 
@@ -240,6 +248,7 @@ def main():
     print("Chain verified", verify_chain())
 
     print(balances)
+    print(delegations)
 
     # modify a block to show verify will fail.
     # chain[1].txs[0].sender = "Someone Else"
